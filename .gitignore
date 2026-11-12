@@ -1,0 +1,4 @@
+.env
+secrets/
+qq-data/
+__pycache__/

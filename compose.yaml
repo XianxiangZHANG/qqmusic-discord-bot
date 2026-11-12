@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    environment:
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:?Set DISCORD_GUILD_ID in .env}
+      DISCORD_OWNER_ID: ${DISCORD_OWNER_ID:?Set DISCORD_OWNER_ID in .env}
+    secrets:
+      - discord_token
+    volumes:
+      - ./qq-data:/qq-data
+secrets:
+  discord_token:
+    file: ./secrets/discord_token.txt
