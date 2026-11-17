@@ -242,4 +242,4 @@ docker compose run --rm --no-deps --volume "${PWD}:/tests:ro" --workdir /tests b
 
 ## 许可证
 
-仓库当前尚未包含 `LICENSE` 文件。
+本项目采用 [MIT License](LICENSE)。第三方依赖仍遵循各自的许可证。
