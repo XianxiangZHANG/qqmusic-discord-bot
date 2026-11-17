@@ -1,156 +1,245 @@
 # QQ Music Discord Bot
 
-自托管的 Discord 音乐机器人。服务器成员可以搜索 QQ 音乐、选择歌曲并在语音频道一起听。部署者可扫码登录自己的 QQ 音乐账号，查看「我喜欢」和收藏歌单。
+自托管的 QQ 音乐 Discord 机器人，支持搜索点歌、语音播放、交互式播放器和三行同步歌词。通过 Docker Compose 部署，QQ 音乐账号由部署者在本机扫码登录。
 
-## 功能和权限
+项目使用非官方 QQ 音乐接口，与 QQ 音乐及 Discord 官方无隶属关系。歌曲可用性取决于账号权限、歌曲版本、地区及上游服务状态。
 
-| 功能 | 谁可以使用 |
+## 功能
+
+- **搜索点歌**：实时联想，或通过搜索结果下拉菜单选歌。
+- **语音队列**：最多 25 首待播歌曲，播完自动退出语音频道。
+- **Components V2 播放器**：歌曲、歌手、封面、进度、语音频道及队列数量；支持暂停／继续、下一首、停止和查看队列。
+- **三行同步歌词**：上一句、当前句、下一句，当前句加粗；按音频进度更新，暂停时停留。
+- **最高可用音质优先**：从高到低请求音源；播放开始前失败时，先切换同档 CDN，再降低音质。
+- **个人收藏**：部署者可以查看登录账号的「我喜欢」及收藏歌单。
+- **语音诊断**：五秒测试音，用来区分语音连接与 QQ 音源问题。
+
+当前适合**一个 Discord 服务器、同一时间一个普通语音频道**。队列和卡片引用保存在内存中，不支持重启恢复。
+
+## 使用权限
+
+| 入口 | 可使用者 |
 | --- | --- |
-| 搜索、点歌和查看队列 | 当前服务器的所有成员 |
-| 切歌、停止和移动机器人 | 部署者及服务器管理员 |
-| 查看个人收藏和播放测试音 | 部署者 |
+| `/search`、`/play`、`/queue` | 服务器成员；点歌需加入普通语音频道，播放期间须与机器人同频道 |
+| 卡片上的暂停／继续、下一首、停止、队列按钮 | **能看到卡片的所有成员**，不检查管理员身份或是否在语音频道 |
+| `/skip`、`/stop`、`/move` | 配置的部署者及服务器管理员 |
+| `/liked`、`/playlists`、`/voice-test` | 配置的部署者 |
 
-一套配置对应一个 Discord 服务器，同一时间在一个语音频道播放。机器人空闲时加入点歌人所在的普通语音频道。播放期间，同频道成员可以继续加歌。队列播完后自动离开。
+卡片按钮与斜杠命令的权限规则不同，请把卡片放在你愿意开放控制的文字频道中。
 
-## 首次部署
+## 环境要求
 
-### 1. 准备 Docker 和项目
+- Docker Engine / Docker Desktop，以及 Docker Compose v2；Windows 使用 Linux 容器。
+- 主机能访问 Discord、QQ 音乐接口及音频 CDN，并允许 Discord 语音所需的 UDP 通信。
+- 一个 Discord 应用、Bot Token，以及有权安装机器人的服务器。
+- 建议准备 QQ 音乐账号；登录不保证任意歌曲或音质都可播放。
 
-Windows 启动 Docker Desktop，使用 Linux 容器。Linux 主机可使用 Docker Engine 和 Docker Compose。主机需要能连接 QQ 音乐和 Discord，并支持 Discord 语音使用的 UDP 通信。
+镜像使用 Python 3.12、FFmpeg、`discord.py[voice]==2.7.1`、`davey==0.1.7` 和 `qqmusic-api-python==0.7.3`。Docker 部署无需在宿主机另外安装 Python 或 FFmpeg。
 
-```powershell
-docker compose version
-docker run --rm hello-world
-```
+## 快速部署
 
-已有项目时，直接进入项目目录。本机部署路径为 `C:\study\QQmusicBot`。从 GitHub 获取代码时，先登录有权访问仓库的账号：
+以下命令以 **PowerShell** 为例，在项目目录执行。
+
+### 1. 获取项目
 
 ```powershell
 git clone https://github.com/XianxiangZHANG/qqmusic-discord-bot.git
-Set-Location qqmusic-discord-bot
+cd qqmusic-discord-bot
+docker compose version
 ```
+
+本文使用默认 Compose 项目名。若已有实例使用 `-p 自定义名称` 启动，后续所有命令都应带上同一个 `-p`，避免重复启动同一个机器人。
 
 ### 2. 创建并邀请 Discord 机器人
 
-1. 在 [Discord Developer Portal](https://discord.com/developers/applications) 创建应用。打开 **Bot** 页面，获取 **Bot Token**。
-2. 打开 **Installation**，启用 **Guild Install**，选择 **Discord Provided Link**。
-3. 在 **Default Install Settings → Guild Install** 添加 `bot` 和 `applications.commands`，为机器人勾选 **View Channels**、**Send Messages**、**Connect** 和 **Speak**。
-4. 保存后打开安装链接，选 **Add to Server**，选择你有「管理服务器」权限的服务器。
-5. 在 Discord 的 **用户设置 → 高级** 启用开发者模式。右键服务器图标复制**服务器 ID**，右键自己的头像复制**用户 ID**。
+在 [Discord Developer Portal](https://discord.com/developers/applications) 创建应用并获取 Bot Token，使用包含 `bot` 和 `applications.commands` 范围的服务器安装链接邀请机器人。
 
-### 3. 配置本机文件
+机器人在目标频道需要：
 
-以下命令在项目目录执行：
+- **View Channels**、**Send Messages**、**Read Message History**。
+- 语音频道的 **Connect** 和 **Speak**。
+
+无需为了删除机器人自己发送的旧卡片而授予 **Manage Messages**，也无需授予 **Administrator**。代码使用默认 Intents，不要求启用 Message Content 特权 Intent。
+
+在 Discord「用户设置 → 高级」中启用开发者模式，复制目标服务器 ID 和部署者用户 ID。
+
+### 3. 创建本机配置
 
 ```powershell
 if (!(Test-Path -LiteralPath '.env')) { Copy-Item '.env.example' '.env' }
-New-Item -ItemType Directory -Path 'secrets' -Force | Out-Null
+New-Item -ItemType Directory -Path secrets -Force | Out-Null
 notepad .env
 ```
 
-在 `.env` 填入两个数字 ID：
+填写自己的数字 ID：
 
 ```dotenv
 DISCORD_GUILD_ID=你的服务器数字ID
 DISCORD_OWNER_ID=你的用户数字ID
 ```
 
-启动前运行 `notepad .\secrets\discord_token.txt`，将 **Bot Token** 单独粘贴到第一行并保存。确认 `discord_token.txt` 是普通文件。
-
-### 4. 启动并验证
+创建 Token 文件，将 Bot Token 单独放在第一行并保存：
 
 ```powershell
-docker compose -p discord-voice-test up --build -d
-docker compose -p discord-voice-test ps
-docker compose -p discord-voice-test logs --tail 50 bot
+notepad .\secrets\discord_token.txt
 ```
 
-看到 `Discord connected. Music commands are registered.` 后，部署者可加入普通语音频道，在服务器文字频道执行 `/voice-test`，确认能听到约五秒的测试音。后续操作沿用同一个 Compose 项目名。
+确认 `discord_token.txt` 是普通文件，不是目录。
 
-### 5. 扫码连接 QQ 音乐
+| 文件 | 用途 | 是否提交 Git |
+| --- | --- | --- |
+| `.env.example` | 空白配置模板 | 是 |
+| `.env` | 本机服务器 ID、部署者 ID | 否 |
+| `secrets/discord_token.txt` | Discord Bot Token | 否 |
+| `qq-data/credential.json` | 扫码后生成的 QQ 音乐登录凭据 | 否 |
+
+`.gitignore` 已忽略本机配置、凭据、缓存及测试依赖；`.dockerignore` 仅允许应用源码和 Dockerfile 进入构建上下文。Token 通过 Compose secret 挂载，QQ 登录数据通过目录挂载，不写入镜像。
+
+### 4. 构建并启动
 
 ```powershell
-docker compose -p discord-voice-test run --rm --no-deps bot python -u qq_login.py login
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 50 bot
 ```
 
-保持终端运行，在文件资源管理器打开提示的二维码图片，再用手机 QQ 扫码确认。如果 QQ 音乐账号使用微信登录，在命令末尾加 `--method wx` 并用微信扫码。登录凭据保存在 `qq-data/credential.json`，脚本还会尝试读取「我喜欢」和收藏歌单。
+看到 `Discord connected. Music commands are registered.` 后，部署者加入普通语音频道并执行 `/voice-test`，确认能听到约五秒的测试音。
 
-检查已有登录是否有效：
+命令仅注册到 `.env` 指定的服务器。不要同时用同一个 Bot Token 启动多个实例。
+
+### 5. 扫码登录 QQ 音乐
 
 ```powershell
-docker compose -p discord-voice-test run --rm --no-deps bot python -u qq_login.py check
+docker compose run --rm --no-deps bot python -u qq_login.py login
 ```
 
-## 在 Discord 里点歌
+保持终端运行，打开提示路径下的二维码图片，用手机 QQ 扫码确认。二维码位于项目的 `qq-data` 临时子目录，登录流程结束后清理。
 
-1. 加入普通语音频道，在同一服务器的文字频道选择 **QQ Music Bot** 的 `/play`。
-2. 在 `keyword` 输入歌名，可以加歌手，例如 `周杰伦 枫`。
-3. 输入时下拉最多显示 10 条建议。选中要听的版本，再发送命令。
-4. 下拉为空或没有想要的版本时，直接发送关键词并留空 `result`。机器人会返回最多 10 首的选歌菜单，选中后加入队列。
-5. 已知搜索序号时，填 `result:1` 至 `result:10` 可直接点歌。
+微信登录账号使用：
+
+```powershell
+docker compose run --rm --no-deps bot python -u qq_login.py login --method wx
+```
+
+凭据保存到 `qq-data/credential.json`。脚本随后检查登录状态并尝试读取收藏；收藏检查失败不一定代表凭据未保存。
+
+检查已有登录：
+
+```powershell
+docker compose run --rm --no-deps bot python -u qq_login.py check
+```
+
+未登录时程序会尝试匿名请求，不保证音源可用。高品质或受限歌曲需要账号具有对应访问权限。
+
+## 点歌与控制
+
+1. 加入普通语音频道，在文字频道输入 `/play`。
+2. 在 `keyword` 输入歌名及歌手，从实时联想中选择版本并发送。
+3. 没有合适联想时，直接发送关键词并留空 `result`，等待下拉选歌菜单。
+4. 选中歌曲后入队，机器人在聊天最新位置发送卡片，并删除上一次记录的卡片。
+
+搜索或入队失败时不替换卡片；切歌和进度刷新继续编辑当前卡片。重启后机器人不再记得旧卡片，重启前遗留的卡片需手动删除。
 
 | 命令 | 用途 |
 | --- | --- |
-| `/search keyword:枫` | 查看前 5 条搜索结果。 |
-| `/play keyword:周杰伦 枫` | 从实时下拉或发送后的菜单选择歌曲。 |
-| `/play keyword:枫 result:1` | 把普通搜索的第一条加入队列。 |
-| `/queue` | 查看当前曲目、待播歌曲和最近的播放提示。 |
-| `/skip` | 跳过当前歌曲。 |
-| `/stop` | 停止播放、清空队列并退出语音频道。 |
-| `/move` | 将播放中的机器人移到你所在的语音频道。先加入目标频道再执行。 |
-| `/liked page:1` | 查看「我喜欢」，每页 10 首。 |
-| `/playlists page:1` | 查看收藏歌单，每页 10 个。 |
-| `/voice-test` | 播放约五秒的测试音。 |
+| `/search keyword:歌名` | 查看前 5 条搜索结果 |
+| `/play keyword:歌名 歌手` | 从实时联想或最多 10 项的下拉菜单点歌 |
+| `/play keyword:歌名 result:1` | 将普通搜索第 1 条结果入队，序号范围 1–10 |
+| `/queue` | 查看当前歌曲、前 10 首待播歌曲及播放提示 |
+| `/skip` | 跳过当前播放的歌曲 |
+| `/stop` | 停止、清空队列并退出语音频道 |
+| `/move` | 移到执行者所在的普通语音频道 |
+| `/liked page:1` | 查看部署者「我喜欢」，每页 10 首 |
+| `/playlists page:1` | 查看部署者收藏歌单，每页 10 个 |
+| `/voice-test` | 播放约五秒的测试音 |
 
-收藏结果只对部署者显示。想播放收藏中的某首歌，可以用歌名和歌手执行 `/play`。QQ 音源是否可播取决于账号、曲目、地区及接口状态。请只播放你获准在频道播放的内容。
+收藏列表仅向部署者显示，当前不支持点击收藏直接点歌，可用歌名及歌手执行 `/play`。
 
-## 日常运行和迁移
+### 音源与音质
 
-```powershell
-docker compose -p discord-voice-test up -d
-docker compose -p discord-voice-test logs -f bot
-docker compose -p discord-voice-test stop
+搜索联想和实际音源使用不同接口：能搜到歌曲不代表对应版本或音质一定可播放。音频由 QQ 音乐接口返回地址，再从 QQ 音乐 CDN 读取。
+
+音质优先顺序：
+
+```text
+臻品母带 → 臻品音质 → FLAC → OGG 640 → OGG 320 → MP3 320
+→ AAC 192 → OGG 192 → MP3 128 → AAC 96 → OGG 96 → AAC 48
 ```
 
-三条命令分别用于启动、跟踪日志和停止。跟踪日志时按 `Ctrl+C` 可以退出日志查看。更新代码后用 `docker compose -p discord-voice-test up --build -d` 重建。使用后台模式启动后，关掉 PowerShell 不影响运行。完全退出 Docker Desktop 或关机后，机器人会离线。
+当前不直接解码 QQ 专用加密文件。Discord 输出仍转为 Opus，高品质输入不代表端到端无损播放。
 
-迁移到云主机时，在新主机部署相同项目，配置 `.env` 和 Token，然后重新扫码或私下迁移已有登录凭据。先停止旧实例，再用同一个 Discord Bot Token 启动新实例，无需重新邀请。分别测试 `/voice-test` 和 QQ 歌曲播放，确认新主机的语音和音源都可用。
+开始播放前，FFmpeg 读取失败、返回 404 或无法解码时，先尝试同档其他 CDN，再请求下一档音质；全部失败才跳过。日志中的 `Trying QQ Music source quality` 记录当前候选的音质及 CDN 序号。
 
-**凭据文件**包括 `secrets/discord_token.txt` 和 `qq-data/credential.json`。这两处以及本机 `.env` 都已被 Git 忽略。备份和迁移时请私下传输，避免贴到聊天、提交到仓库或写进镜像。
+手动切歌不重试。已经播出音频后的故障不会通过换源从头重播；FFmpeg 按现有参数尝试网络重连，提前结束时记录已播时长和曲库标注时长。
+
+### 歌词与进度
+
+进度条上方显示上一句、当前句、下一句；当前句加粗，上下句以小字显示。歌词按 LRC 时间戳匹配音频输出帧，暂停时保持当前句。
+
+每约 2 秒检查歌词，换行时刷新卡片；没有换行时约每 10 秒刷新进度。网络和 Discord 限流可能导致延迟。歌词获取失败或没有时间戳时显示「暂无同步歌词」，不影响播放。
+
+进度条只作显示，不支持拖动定位。
+
+## 更新、停止和迁移
+
+```powershell
+# 更新并重建；重启会中断播放及清空内存队列
+git pull --ff-only
+docker compose up -d --build
+
+# 查看日志；Ctrl+C 仅退出日志查看
+docker compose logs -f bot
+
+# 停止，保留本机配置和登录文件
+docker compose stop
+
+# 再次启动
+docker compose up -d
+```
+
+后台运行后可以关闭终端；主机关机、Docker 停止或容器停止时机器人离线。当前 Compose 配置未设置自动重启策略。
+
+迁移前先停止旧实例，在新主机获取代码，配置 `.env`、Bot Token，再重新扫码或私下迁移 `qq-data/credential.json`。不要将凭据贴入 Issue、截图或公开日志。完成后分别验证测试音、搜索和歌曲播放。
 
 ## 常见问题
 
-| 现象 | 检查方法 |
+| 现象 | 检查方式 |
 | --- | --- |
-| 机器人上线前看不到命令 | 检查容器日志、服务器 ID 和安装时的 `applications.commands` 范围。 |
-| 容器提示 Token 路径是目录 | 确认 `secrets/discord_token.txt` 是文件，然后执行 `docker compose -p discord-voice-test up -d --force-recreate`。 |
-| 能进语音频道但没声音 | 先跑 `/voice-test`，检查频道讲话权限、服务器静音和个人音量。如果日志显示 DAVE 超时，确认镜像使用 Dockerfile 固定的 `discord.py 2.7.1` 和 `davey 0.1.7`。 |
-| 实时联想为空或条数较少 | QQ 音乐接口可能返回较少结果或没赶上 Discord 的响应时限。直接发送关键词并留空 `result`，等待选歌菜单。 |
-| 某首歌播不了或提前结束 | 执行 `/queue` 查看提示，再检查容器日志。若 `audio_seconds` 比 `catalog_seconds` 短很多，对照同一版本在 QQ 音乐客户端的时长。 |
-| 收藏列表读不出来 | 运行 `qq_login.py check` 的检查命令。凭据失效时重新扫码。 |
+| 看不到命令 | 检查日志、`DISCORD_GUILD_ID` 及安装链接的 `applications.commands` 范围 |
+| Token 路径被识别为目录 | 确保 `secrets/discord_token.txt` 是普通文件，修正后运行 `docker compose up -d --force-recreate` |
+| 能进语音频道但没声音 | 先执行 `/voice-test`，检查 Connect/Speak 权限、静音、个人音量及 UDP 网络 |
+| DAVE 超时 | 使用 Dockerfile 固定版本重新构建，并检查语音连接日志 |
+| 联想为空或较慢 | 直接发送关键词并留空 `result`，使用发送后的选歌菜单 |
+| 能搜索但音源 404 | 检查是否继续尝试其他 CDN 和较低音质；全部失败时可尝试其他歌曲版本 |
+| 歌曲提前结束 | 查看 `/queue`，对比日志的 `audio_seconds`、`catalog_seconds`，检查上游断流及版本差异 |
+| 没有卡片或旧卡片未清理 | 检查文字频道权限和日志；重启前的卡片需要手动删除 |
+| 按钮没有响应 | 点击当前实例新生成的卡片，检查容器异常日志并更新代码 |
+| 歌词不显示或滞后 | 检查歌词获取日志；部分歌曲没有同步歌词，显示受时间戳及网络影响 |
+| 登录或收藏失效 | 执行 `qq_login.py check`，必要时重新扫码；设备数量限制需先在账号侧处理 |
 
-## 项目文件
+## 开发与测试
 
-- `bot.py` 处理 Discord 命令、实时联想、选歌菜单、队列和语音控制。
-- `qq_provider.py` 连接 QQ 音乐搜索、联想和音源接口。
-- `qq_login.py` 处理本机扫码、凭据保存和登录检查。
-- `Dockerfile` 和 `compose.yaml` 定义运行环境与本机文件挂载。
+测试使用 Python 标准库 `unittest`，不需要额外测试框架。通过镜像挂载源码执行：
 
-项目使用 Python、discord.py、FFmpeg 和非官方 QQMusicApi。QQ 音乐接口变更可能影响登录、搜索或播放。
-# 聊天播放器
+```powershell
+docker compose build
+docker compose run --rm --no-deps --volume "${PWD}:/tests:ro" --workdir /tests bot python -m unittest discover -v
+```
 
-使用 `/play` 点歌并选中歌曲后，机器人会在文字频道发送 Components V2 播放器卡片。
-卡片显示歌曲、专辑封面（有专辑信息时）、音频进度、语音频道和待播数量，每 10 秒刷新。
-所有成员均可点击暂停／继续、下一首、停止及查看队列；现有斜杠命令的管理权限保持原样。
-机器人需要在文字频道拥有查看频道、发送消息和读取消息历史的权限。
-每次成功点歌后，会在最新消息位置发送新卡片并删除上一张卡片；进度刷新仍编辑当前卡片。点歌失败不会替换卡片。
-播放结束后控制按钮会禁用。重启后旧卡片不再响应，重新点歌会创建新卡片（重启前的卡片需手动删除）。
+这些测试不连接 Discord 语音、不读取真实账号凭据、不真实点歌。覆盖音质选择、CDN 顺序、启动失败重试、手动跳过、歌词解析、三行显示及卡片按钮回调。
 
-音源自动优先请求账号及歌曲可用的最高立体声音质：臻品母带 → 臻品音质 → FLAC → 高码率 OGG/MP3 → 标准及流畅音质。
-单档请求失败或超时后会尝试下一档，日志中的 `Trying QQ Music source quality` 显示当前尝试的音质和 CDN 序号。
-音源开始播放前遇到 HTTP 404、连接失败或无法解码时，会先尝试同档其他 CDN，再降低音质；所有候选失败后才跳过歌曲。
-手动切歌不会重试；已播出音频后的中途失败不会从头重播，仍由原有断流处理负责。
-当前不支持直接播放 QQ 专用加密格式；Discord 语音输出仍会转为 Opus。
+| 文件 | 职责 |
+| --- | --- |
+| `bot.py` | Discord 命令、队列、音频播放、卡片生命周期和刷新 |
+| `music_panel.py` | Components V2 布局和按钮 |
+| `lyrics.py` | LRC 解析、时间偏移及三行歌词匹配 |
+| `qq_provider.py` | QQ 搜索、联想、歌词、音质与 CDN 候选 |
+| `qq_login.py` | 扫码、凭据保存和登录检查 |
+| `test_*.py` | 回归测试 |
+| `Dockerfile`、`compose.yaml` | 镜像及运行配置 |
 
-播放器在进度条上方显示上一句、当前句、下一句三行歌词，当前句加粗突出；每换一句更新三行，按实际输出的音频进度匹配时间戳，暂停时停留。
-歌词独立加载，获取失败或没有时间戳时显示“暂无同步歌词”，不影响播放。换行刷新最短约 2 秒一次，受 Discord 网络延迟和限流影响可能稍有延迟。
+提交问题时，请提供复现步骤、歌曲名称／版本、错误时间及已脱敏日志；不要提供 Token、QQ 登录凭据或带签名的音源链接。请只播放你有权在频道播放的内容。
+
+## 许可证
+
+仓库当前尚未包含 `LICENSE` 文件。
