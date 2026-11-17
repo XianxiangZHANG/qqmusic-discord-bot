@@ -11,6 +11,18 @@ from music_panel import PlayerView
 
 
 class PanelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lyric_is_rendered_above_progress(self):
+        view = PlayerView(dict(active=True, lyric='当前这一行歌词', elapsed=80, duration=269), None)
+        payload = str(view.to_components())
+        self.assertLess(payload.index('当前这一行歌词'), payload.index('1:20'))
+
+    async def test_three_lyrics_render_in_order_and_highlight_current(self):
+        view = PlayerView(dict(active=True, lyric_lines=('上一句', '当前句', '下一句')), None)
+        payload = str(view.to_components())
+        self.assertLess(payload.index('上一句'), payload.index('当前句'))
+        self.assertLess(payload.index('当前句'), payload.index('下一句'))
+        self.assertIn('**当前句**', payload)
+
     async def test_new_request_replaces_and_deletes_previous_card(self):
         tree = ast.parse(Path('bot.py').read_text(encoding='utf-8'))
         handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)

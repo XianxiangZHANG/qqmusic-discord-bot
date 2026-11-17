@@ -36,7 +36,12 @@ class PlayerView(discord.ui.LayoutView):
                 await action(command, interaction)
             button.callback = callback
             row.add_item(button)
+        lyric_lines = state.get('lyric_lines') or ('', state.get('lyric') or '暂无同步歌词', '')
+        previous, lyric, following = [discord.utils.escape_markdown(' '.join(line.split()))[:500]
+                                      for line in lyric_lines]
+        lyric_block = f'-# {previous or "　"}\n🎤 **{lyric}**\n-# {following or "　"}'
         children = [discord.ui.TextDisplay(f'## {heading}'), discord.ui.Separator(), body,
+                    discord.ui.TextDisplay(lyric_block),
                     discord.ui.TextDisplay(info)]
         if state.get('status'):
             children.append(discord.ui.TextDisplay(discord.utils.escape_markdown(state['status'])[:500]))

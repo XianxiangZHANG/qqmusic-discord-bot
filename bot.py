@@ -14,7 +14,8 @@ from qqmusic_api import Client
 
 from qq_login import load_credential
 from music_panel import PlayerView
-from qq_provider import find_song_by_mid, resolve_track, search_songs, suggest_songs
+from qq_provider import find_song_by_mid, resolve_track, search_songs, suggest_songs, fetch_lyrics
+from lyrics import lyric_context
 
 GUILD = discord.Object(id=int(os.environ["DISCORD_GUILD_ID"]))
 OWNER_ID = int(os.environ["DISCORD_OWNER_ID"])
@@ -99,6 +100,7 @@ skip_requested = False
 panel_message = None
 panel_task = None
 panel_lock = asyncio.Lock()
+lyric_task = None
 
 
 def player_state():
@@ -107,10 +109,16 @@ def player_state():
     track = current_song
     album_mid = getattr(getattr(track, 'album', None), 'mid', None)
     source = voice.source if voice else None
+    elapsed = getattr(source, 'frames_read', 0) * 0.02
+    lyric = '歌词加载中…' if active else '♪ 播放已结束'
+    lyric_lines = ('', lyric, '')
+    if active and lyric_task is not None and lyric_task.done() and not lyric_task.cancelled():
+        lyric_lines = lyric_context(lyric_task.result(), elapsed)
+        lyric = lyric_lines[1]
     return dict(active=active, paused=bool(voice and voice.is_paused()),
                 title=track_label(track) if track else '准备播放…' if active else '播放结束',
                 cover=f'https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg' if album_mid else None,
-                elapsed=getattr(source, 'frames_read', 0) * 0.02,
+                elapsed=elapsed, lyric=lyric, lyric_lines=lyric_lines,
                 duration=getattr(track, 'interval', 0), queue_size=len(queue),
                 channel=playback_channel.mention if playback_channel else None,
                 status=playback_status)
@@ -131,9 +139,16 @@ async def refresh_panel():
 
 
 async def panel_updates():
+    last_lyric = None
+    last_refresh = 0
     while playback_task is not None and not playback_task.done():
-        await refresh_panel()
-        await asyncio.sleep(10)
+        state = player_state()
+        now = asyncio.get_running_loop().time()
+        if state['lyric_lines'] != last_lyric or now - last_refresh >= 10:
+            await refresh_panel()
+            last_lyric = state['lyric_lines']
+            last_refresh = now
+        await asyncio.sleep(2)
     await refresh_panel()
 
 
@@ -219,7 +234,7 @@ def describe_ffmpeg_failure(output):
 
 
 async def play_queue(channel):
-    global current_song, playback_status, playback_channel, skip_requested
+    global current_song, playback_status, playback_channel, skip_requested, lyric_task
     voice = None
     try:
         voice = await channel.connect(timeout=20, reconnect=False)
@@ -228,6 +243,7 @@ async def play_queue(channel):
             current_song = queue.popleft()
             playback_status = None
             skip_requested = False
+            lyric_task = asyncio.create_task(fetch_lyrics(current_song))
             source = None
             diagnostics = None
             try:
@@ -282,6 +298,12 @@ async def play_queue(channel):
                     playback_status = describe_ffmpeg_failure(diagnostics.read(16384).decode("utf-8", "replace"))
                 logger.warning("Music playback failed (%s): %s", type(error).__name__, playback_status)
             finally:
+                if lyric_task is not None and not lyric_task.done():
+                    lyric_task.cancel()
+                    try:
+                        await lyric_task
+                    except asyncio.CancelledError:
+                        pass
                 if source is not None:
                     source.cleanup()
                 if diagnostics is not None:
@@ -292,6 +314,7 @@ async def play_queue(channel):
     finally:
         queue.clear()
         current_song = None
+        lyric_task = None
         playback_channel = None
         if voice is not None:
             try:

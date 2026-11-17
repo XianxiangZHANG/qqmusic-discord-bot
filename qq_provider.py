@@ -8,6 +8,7 @@ from qqmusic_api.core.versioning import Platform
 from qqmusic_api.modules.song import SongFileInfo, SongQueryInfo, SongFileType
 
 from qq_login import load_credential
+from lyrics import parse_lrc
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,17 @@ async def find_song_by_mid(mid):
         async with Client(credential=playback_credential()) as qq:
             response = await qq.song.query_song([SongQueryInfo(mid=mid)])
             return next((track for track in response.tracks if track.mid == mid), None)
+
+
+async def fetch_lyrics(track):
+    try:
+        async with asyncio.timeout(8):
+            async with Client(credential=playback_credential()) as qq:
+                response = await qq.lyric.get_lyric(track.mid, qrc=False)
+                return parse_lrc(response.lyric)
+    except Exception as error:
+        logger.warning('Lyrics unavailable (%s).', type(error).__name__)
+        return []
 
 
 async def resolve_track(track):
