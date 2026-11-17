@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from dataclasses import replace
+from contextlib import aclosing
 from urllib.parse import urljoin, urlsplit
 
 from qqmusic_api import Client, Credential
@@ -83,26 +84,38 @@ async def fetch_lyrics(track):
 
 
 async def resolve_track(track):
+    # Compatibility helper for callers that only need the first candidate.
+    async with aclosing(iter_track_sources(track)) as candidates:
+        async for url in candidates:
+            return url
+    return None
+
+
+async def iter_track_sources(track):
+    """Yield every CDN for a quality before requesting the next quality."""
     credential = playback_credential()
+    seen = set()
     async with Client(credential=credential) as qq:
         for quality in PLAYBACK_QUALITIES:
             try:
                 async with asyncio.timeout(5):
-                    url = await request_track_quality(qq, credential, track, quality)
+                    urls = await request_track_urls(qq, credential, track, quality)
             except Exception as error:
                 # A format may be unavailable for this song/account, or its
                 # endpoint may fail. Never log signed URLs or credentials.
                 logger.warning('Audio quality %s failed (%s); trying next.',
                                quality.name, type(error).__name__)
                 continue
-            if url:
-                logger.info('Selected QQ Music source quality: %s.', quality.name)
-                return url
-    logger.warning('No available QQ Music source at any supported quality.')
-    return None
+            for index, url in enumerate(urls, 1):
+                if url in seen:
+                    continue
+                seen.add(url)
+                logger.info('Trying QQ Music source quality=%s, CDN=%d.', quality.name, index)
+                yield url
+    logger.warning('Exhausted QQ Music source candidates.')
 
 
-async def request_track_quality(qq, credential, track, quality):
+async def request_track_urls(qq, credential, track, quality):
     # Keep the signed path paired with the CDN from this quality's response.
     media_mid = getattr(getattr(track, 'file', None), 'media_mid', None)
     request = qq.song.get_song_urls([
@@ -124,31 +137,39 @@ async def request_track_quality(qq, credential, track, quality):
     )
     response = await stream_request
 
-    url = select_stream_url(response, track.mid)
+    urls = stream_urls(response, track.mid)
     entries = response.get("midurlinfo") or []
     codes = [entry["result"] for entry in entries if type(entry.get("result")) is int]
     logger.info(
         "QQ Music quality=%s: result_codes=%s, CDN_count=%d, usable_https=%s.",
-        quality.name, codes, len(response.get("sip") or []), bool(url),
+        quality.name, codes, len(response.get("sip") or []), bool(urls),
     )
-    return url
+    return urls
 
 
 def select_stream_url(response, song_mid):
+    return next(iter(stream_urls(response, song_mid)), None)
+
+
+def stream_urls(response, song_mid):
+    urls = []
     for entry in response.get("midurlinfo") or []:
         path = entry.get("purl")
         if entry.get("songmid") != song_mid or entry.get("result", 0) != 0 or not path:
             continue
         absolute = urlsplit(path)
         if absolute.scheme or absolute.netloc:
-            return qq_https_url(path)
+            url = qq_https_url(path)
+            if url and url not in urls:
+                urls.append(url)
+            continue
         for base in response.get("sip") or []:
             https_base = qq_https_url(base)
             if https_base:
                 url = urljoin(https_base, path)
-                if urlsplit(url).netloc == urlsplit(https_base).netloc:
-                    return url
-    return None
+                if urlsplit(url).netloc == urlsplit(https_base).netloc and url not in urls:
+                    urls.append(url)
+    return urls
 
 
 def qq_https_url(value):

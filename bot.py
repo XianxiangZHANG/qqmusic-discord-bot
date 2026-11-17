@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from collections import OrderedDict, deque
+from contextlib import aclosing
 from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryFile
@@ -14,7 +15,7 @@ from qqmusic_api import Client
 
 from qq_login import load_credential
 from music_panel import PlayerView
-from qq_provider import find_song_by_mid, resolve_track, search_songs, suggest_songs, fetch_lyrics
+from qq_provider import find_song_by_mid, iter_track_sources, search_songs, suggest_songs, fetch_lyrics
 from lyrics import lyric_context
 
 GUILD = discord.Object(id=int(os.environ["DISCORD_GUILD_ID"]))
@@ -247,36 +248,59 @@ async def play_queue(channel):
             source = None
             diagnostics = None
             try:
-                url = await resolve_track(current_song)
-                if url is None:
-                    playback_status = "QQ 音乐未返回可用的完整音源，已跳过。"
-                    continue
-                diagnostics = TemporaryFile()
-                audio = source = CountedAudio(
-                    url,
-                    before_options=(
-                        "-rw_timeout 15000000 -user_agent Mozilla/5.0 "
-                        "-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 3"
-                    ),
-                    stderr=diagnostics,
-                )
                 loop = asyncio.get_running_loop()
-                finished = loop.create_future()
+                last_failure = None
+                async with aclosing(iter_track_sources(current_song)) as candidates:
+                    async for url in candidates:
+                        if diagnostics is not None:
+                            diagnostics.close()
+                        diagnostics = TemporaryFile()
+                        audio = None
+                        try:
+                            audio = source = CountedAudio(
+                                url,
+                                before_options=(
+                                    "-rw_timeout 15000000 -user_agent Mozilla/5.0 "
+                                    "-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 3"
+                                ),
+                                stderr=diagnostics,
+                            )
+                            finished = loop.create_future()
 
-                def after_playback(error, future=finished):
-                    def complete():
-                        if not future.done():
-                            future.set_result(error)
-                    loop.call_soon_threadsafe(complete)
+                            def after_playback(error, future=finished):
+                                def complete():
+                                    if not future.done():
+                                        future.set_result(error)
+                                loop.call_soon_threadsafe(complete)
 
-                voice.play(source, after=after_playback)
-                source = None
-                await refresh_panel()
-                error = await finished
-                if error is not None:
-                    raise error
-                if audio.frames_read == 0:
-                    raise RuntimeError("FFmpeg produced no audio frames")
+                            voice.play(source, after=after_playback)
+                            source = None
+                            await refresh_panel()
+                            error = await finished
+                            if skip_requested:
+                                break
+                            if error is not None:
+                                raise error
+                            if audio.frames_read == 0:
+                                raise RuntimeError('FFmpeg produced no audio frames')
+                            break
+                        except Exception:
+                            # Retry only before audio has started. Replaying a
+                            # source after a mid-song error would restart the song.
+                            if audio is not None and audio.frames_read > 0:
+                                raise
+                            diagnostics.seek(0)
+                            last_failure = describe_ffmpeg_failure(
+                                diagnostics.read(16384).decode('utf-8', 'replace'))
+                            logger.warning('Source failed before audio started; trying next CDN/quality: %s',
+                                           last_failure)
+                        finally:
+                            if source is not None:
+                                source.cleanup()
+                                source = None
+                    else:
+                        playback_status = last_failure or '所有音质和 CDN 均无可用音源，已跳过。'
+                        continue
                 if not skip_requested:
                     expected = getattr(current_song, "interval", 0) or 0
                     played = round(audio.frames_read * 0.02)
