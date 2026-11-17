@@ -13,6 +13,7 @@ from discord import app_commands
 from qqmusic_api import Client
 
 from qq_login import load_credential
+from music_panel import PlayerView
 from qq_provider import find_song_by_mid, resolve_track, search_songs, suggest_songs
 
 GUILD = discord.Object(id=int(os.environ["DISCORD_GUILD_ID"]))
@@ -95,6 +96,97 @@ playback_channel = None
 current_song = None
 playback_status = None
 skip_requested = False
+panel_message = None
+panel_task = None
+panel_lock = asyncio.Lock()
+
+
+def player_state():
+    voice = playback_channel.guild.voice_client if playback_channel else None
+    active = playback_channel is not None and playback_task is not None and not playback_task.done()
+    track = current_song
+    album_mid = getattr(getattr(track, 'album', None), 'mid', None)
+    source = voice.source if voice else None
+    return dict(active=active, paused=bool(voice and voice.is_paused()),
+                title=track_label(track) if track else '准备播放…' if active else '播放结束',
+                cover=f'https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg' if album_mid else None,
+                elapsed=getattr(source, 'frames_read', 0) * 0.02,
+                duration=getattr(track, 'interval', 0), queue_size=len(queue),
+                channel=playback_channel.mention if playback_channel else None,
+                status=playback_status)
+
+
+async def refresh_panel():
+    global panel_message
+    async with panel_lock:
+        if panel_message is None:
+            return
+        try:
+            await panel_message.edit(view=PlayerView(player_state(), panel_action),
+                                     allowed_mentions=discord.AllowedMentions.none())
+        except discord.NotFound:
+            panel_message = None
+        except discord.HTTPException:
+            logger.warning('Could not refresh player panel.')
+
+
+async def panel_updates():
+    while playback_task is not None and not playback_task.done():
+        await refresh_panel()
+        await asyncio.sleep(10)
+    await refresh_panel()
+
+
+async def ensure_panel(channel):
+    global panel_message, panel_task
+    if channel is None or playback_task is None or playback_task.done():
+        return
+    async with panel_lock:
+        previous = panel_message
+        try:
+            panel_message = await channel.send(view=PlayerView(player_state(), panel_action),
+                                               allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            logger.warning('Could not send player panel; check channel permissions.')
+            return
+        if previous is not None:
+            try:
+                await previous.delete()
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                logger.warning('Could not delete previous player panel.')
+    if panel_task is None or panel_task.done():
+        panel_task = asyncio.create_task(panel_updates())
+    await refresh_panel()
+
+
+async def panel_action(action, interaction):
+    global skip_requested
+    if action == 'queue':
+        await show_queue.callback(interaction)
+        return
+    await interaction.response.defer()
+    voice = playback_channel.guild.voice_client if playback_channel else None
+    if action == 'stop':
+        task = playback_task
+        async with move_lock:
+            if task is not None and not task.done() and playback_task is task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+    elif voice is not None:
+        if action == 'pause':
+            if voice.is_paused():
+                voice.resume()
+            elif voice.is_playing():
+                voice.pause()
+        elif action == 'skip' and (voice.is_playing() or voice.is_paused()):
+            skip_requested = True
+            voice.stop()
+    await refresh_panel()
 
 
 def track_label(track):
@@ -145,7 +237,12 @@ async def play_queue(channel):
                     continue
                 diagnostics = TemporaryFile()
                 audio = source = CountedAudio(
-                    url, before_options="-rw_timeout 15000000 -user_agent Mozilla/5.0", stderr=diagnostics
+                    url,
+                    before_options=(
+                        "-rw_timeout 15000000 -user_agent Mozilla/5.0 "
+                        "-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 3"
+                    ),
+                    stderr=diagnostics,
                 )
                 loop = asyncio.get_running_loop()
                 finished = loop.create_future()
@@ -158,6 +255,7 @@ async def play_queue(channel):
 
                 voice.play(source, after=after_playback)
                 source = None
+                await refresh_panel()
                 error = await finished
                 if error is not None:
                     raise error
@@ -168,7 +266,15 @@ async def play_queue(channel):
                     played = round(audio.frames_read * 0.02)
                     logger.info("Track ended: audio_seconds=%d, catalog_seconds=%d.", played, expected)
                     if expected > played + 5:
+                        diagnostics.seek(0)
+                        output = diagnostics.read(16384).decode("utf-8", "replace").lower()
+                        interrupted = any(marker in output for marker in (
+                            "stream ends prematurely", "connection reset", "connection timed out",
+                        ))
+                        logger.warning("Track ended early: interrupted_transfer=%s.", interrupted)
                         playback_status = f"音频在约 {played} 秒结束，QQ 音乐标注时长为 {expected} 秒。"
+                        if interrupted:
+                            playback_status += "读取音源时连接中断。"
             except Exception as error:
                 playback_status = "曲目播放失败，已跳过。"
                 if diagnostics is not None:
@@ -192,6 +298,7 @@ async def play_queue(channel):
                 await voice.disconnect(force=True)
             except Exception as error:
                 logger.warning("Music disconnect failed (%s).", type(error).__name__)
+        await refresh_panel()
 
 
 def can_manage_music(member):
@@ -271,6 +378,8 @@ class TrackPicker(discord.ui.View):
         await interaction.response.edit_message(
             content=message, view=None, allowed_mentions=discord.AllowedMentions.none()
         )
+        if message.startswith('已加入队列：'):
+            await ensure_panel(interaction.channel)
 
 
 @commands.command(name="play", description="搜索 QQ 音乐歌曲并加入播放队列", guild=GUILD)
@@ -310,6 +419,8 @@ async def play(interaction: discord.Interaction, keyword: str, result: app_comma
     message = enqueue_track(interaction.user, track)
     await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
                                     suppress_embeds=True)
+    if message.startswith('已加入队列：'):
+        await ensure_panel(interaction.channel)
 
 
 autocomplete_cache = OrderedDict()
